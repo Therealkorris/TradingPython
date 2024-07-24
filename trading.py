@@ -4,15 +4,14 @@ import numpy as np
 from backtesting import Backtest, Strategy
 from backtesting.lib import crossover
 from backtesting.test import SMA
-import ccxt
-import io
-import os, json
+import os, json, io, csv, itertools, time, ccxt
 from datetime import datetime, timedelta
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import time
-import itertools
-import csv
+import base64
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -50,14 +49,6 @@ def fetch_binance_data(symbol, timeframe, start_date, end_date):
     df = df[~df.index.duplicated(keep='first')]  # Remove duplicate indices
     return df
 
-def save_data_to_csv(df, filename):
-    df.to_csv(filename)
-    print(f"Data saved to {filename}")
-
-def load_data_from_csv(filename):
-    df = pd.read_csv(filename, index_col='timestamp', parse_dates=True)
-    return df
-
 def ATR(high, low, close, length):
     tr = np.maximum(high - low, 
                     np.abs(high - np.roll(close, 1)),
@@ -87,6 +78,7 @@ class ImprovedTrading(Strategy):
         self.atr = self.I(ATR, self.data.High, self.data.Low, self.data.Close, int(self.atr_length), name='ATR')
         self.hh_atr = self.I(lambda: pd.Series(self.data.Close).rolling(int(self.period_high_atr)).max(), name='HH ATR')
         self.atr_stop = self.I(lambda: self.hh_atr - self.atr_multiplier * self.atr, name='ATR Stop')
+
 
     def next(self):
         buy_condition = (
@@ -139,165 +131,14 @@ def generate_trade_details(stats):
     
     return trade_details.sort_values('Entry Time')
 
-def add_summary_and_parameters_to_html(filename, summary, parameters, trade_details, all_results):
-    with open(filename, 'r', encoding='utf-8') as file:
-        content = file.read()
-    
-    summary_table = pd.DataFrame([summary]).transpose().to_html(classes='display', table_id='summary-table', header=False)
-    parameters_table = pd.DataFrame([parameters]).transpose().to_html(classes='display', table_id='parameters-table', header=False)
-    trade_details_table = trade_details.to_html(classes='display', table_id='trade-details-table', index=False)
-    all_results_table = all_results.to_html(classes='display', table_id='all-results-table', index=False, escape=False)
-    
-    tables_html = f"""
-    <h2>Trade Details (Best Parameters)</h2>
-    {trade_details_table}
-    <h2>All Optimization Results</h2>
-    {all_results_table}
-    <h2>Summary</h2>
-    {summary_table}
-    <h2>Best Parameters</h2>
-    {parameters_table}
-    """
-    
-    style = """
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f0f0f0;
-        }
-        .container {
-            background-color: white;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-        }
-        h1, h2 {
-            color: #333;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 20px;
-        }
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #ddd;
-        }
-        th {
-            background-color: #f2f2f2;
-            font-weight: bold;
-        }
-        tr:hover {
-            background-color: #f5f5f5;
-        }
-        .dataTables_wrapper .dataTables_filter {
-            float: right;
-            text-align: right;
-        }
-        .trade-details {
-            display: none;
-            background-color: #f9f9f9;
-            padding: 10px;
-            border: 1px solid #ddd;
-            margin-top: 5px;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        .trade-details table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        .trade-details th, .trade-details td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-        .trade-details th {
-            background-color: #f2f2f2;
-        }
-    </style>
-    """
-    
-    script = """
-    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.10.25/css/jquery.dataTables.css">
-    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/buttons/1.7.1/css/buttons.dataTables.min.css">
-    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/colreorder/1.5.4/css/colReorder.dataTables.min.css">
-    <script type="text/javascript" charset="utf8" src="https://code.jquery.com/jquery-3.5.1.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/1.10.25/js/jquery.dataTables.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/buttons/1.7.1/js/dataTables.buttons.min.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/buttons/1.7.1/js/buttons.colVis.min.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/colreorder/1.5.4/js/dataTables.colReorder.min.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.3/jszip.min.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.53/pdfmake.min.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.53/vfs_fonts.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/buttons/1.7.1/js/buttons.html5.min.js"></script>
-    <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/buttons/1.7.1/js/buttons.print.min.js"></script>
-    <script>
-    $(document).ready(function() {
-        var table = $('.display').DataTable({
-            dom: 'Bfrtip',
-            buttons: [
-                'copy', 'csv', 'excel', 'pdf', 'print',
-                {
-                    extend: 'colvis',
-                    text: 'Show/Hide Columns'
-                }
-            ],
-            pageLength: 25,
-            colReorder: true
-        });
-
-        $('#all-results-table').on('click', '.show-trades', function(e) {
-            e.preventDefault(); // Prevent scrolling to top
-            var $this = $(this);
-            var tradesData = $this.data('trades');
-            var detailsDiv = $this.next('.trade-details');
-
-            if (detailsDiv.is(':empty')) {
-                var tableHtml = '<table><thead><tr><th>Type</th><th>Time</th><th>Price</th><th>Amount</th></tr></thead><tbody>';
-                tradesData.forEach(function(trade) {
-                    tableHtml += '<tr>' +
-                                '<td>' + trade.type + '</td>' +
-                                '<td>' + trade.time + '</td>' +
-                                '<td>' + trade.price + '</td>' +
-                                '<td>' + trade.amount + '</td>' +
-                                '</tr>';
-                });
-                tableHtml += '</tbody></table>';
-                detailsDiv.html(tableHtml);
-            }
-
-            detailsDiv.slideToggle(200); // Animate the show/hide
-            $this.text(function(i, text) {
-                return text === "Show Trades (" + tradesData.length + ")" ? "Hide Trades (" + tradesData.length + ")" : "Show Trades (" + tradesData.length + ")";
-            });
-
-            // Adjust the DataTable's row height
-            table.row($this.closest('tr')).invalidate().draw();
-        });
-    });
-    </script>
-    """
-    
-    new_content = content.replace('</head>', f'{style}{script}</head>')
-    new_content = new_content.replace('<body>', '<body><div class="container">')
-    new_content = new_content.replace('</body>', f'{tables_html}</div></body>')
-    
-    with open(filename, 'w', encoding='utf-8') as file:
-        file.write(new_content)
-
-
 def run_backtest(symbol, timeframe, start_date, end_date, parameters):
     csv_filename = f"{symbol.replace('/', '_')}_{timeframe}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv"
     
     if not os.path.exists(csv_filename):
         data = fetch_binance_data(symbol, timeframe, start_date, end_date)
-        save_data_to_csv(data, csv_filename)
+        data.to_csv(csv_filename)
     else:
-        data = load_data_from_csv(csv_filename)
+        data = pd.read_csv(csv_filename, index_col='timestamp', parse_dates=True)
     
     data = data.loc[start_date:end_date]
     
@@ -317,7 +158,9 @@ def run_backtest(symbol, timeframe, start_date, end_date, parameters):
         "Win Rate": f"{stats['Win Rate [%]']:.2f}%"
     }
     
-    return summary, stats, ImprovedTrading.trade_history
+    chart_html = bt.plot(filename=None, open_browser=False)
+    
+    return summary, stats, ImprovedTrading.trade_history, chart_html
 
 def get_parameter_ranges(range_size):
     if range_size == 'small':
@@ -364,8 +207,7 @@ def optimize_parameters(symbol, timeframe, start_date, end_date, range_size):
     
     for i, combo in enumerate(combinations, 1):
         parameters = dict(zip(parameter_ranges.keys(), combo))
-        summary, stats, trades = run_backtest(symbol, timeframe, start_date, end_date, parameters)
-        trades_json = json.dumps(trades)
+        summary, stats, trades, _ = run_backtest(symbol, timeframe, start_date, end_date, parameters)
         results.append({
             **parameters, 
             'Total Return': float(stats['Return [%]']),
@@ -373,7 +215,6 @@ def optimize_parameters(symbol, timeframe, start_date, end_date, range_size):
             'Max Drawdown': float(stats['Max. Drawdown [%]']),
             'Total Trades': int(stats['# Trades']),
             'Win Rate': float(stats['Win Rate [%]']),
-            'Trades': f'<a href="#" class="show-trades" data-trades=\'{trades_json}\'>Show Trades ({len(trades)})</a><div class="trade-details"></div>'
         })
         
         if i % 10 == 0 or i == total_combinations:
@@ -382,47 +223,36 @@ def optimize_parameters(symbol, timeframe, start_date, end_date, range_size):
     results_df = pd.DataFrame(results)
     best_result = results_df.loc[results_df['Total Return'].idxmax()]
     
-    return best_result.to_dict(), results_df
-
-def save_results_to_csv(results_df, filename):
-    results_df.to_csv(filename, index=False)
-    print(f"Results saved to {filename}")
-
-if __name__ == '__main__':
-    symbol = 'BTC/USDT'
-    start_date = datetime(2023, 1, 1)
-    end_date = datetime(2023, 12, 31)
-    timeframe = '4h'
+    # Only return the parameters that are part of the strategy
+    best_parameters = {k: v for k, v in best_result.items() if k in parameter_ranges}
     
-    # Choose 'small', 'medium', or 'large' for different range sizes
-    range_size = 'small'
+    return best_parameters, results_df
+
+@app.route('/api/trading/optimize', methods=['POST'])
+def process_optimization_request():
+    data = request.json
+    symbol = data['symbol']
+    timeframe = data['timeframe']
+    start_date = datetime.strptime(data['startDate'], '%Y-%m-%d')
+    end_date = datetime.strptime(data['endDate'], '%Y-%m-%d')
+    range_size = data['rangeSize']
     
     best_parameters, all_results = optimize_parameters(symbol, timeframe, start_date, end_date, range_size)
     
-    print("Best parameters found:")
-    print(best_parameters)
-    
-    # Remove 'Total Return' and 'Trades' from best_parameters
-    best_parameters_for_backtest = {k: v for k, v in best_parameters.items() if k not in ['Total Return', 'Trades', 'Sharpe Ratio', 'Max Drawdown', 'Total Trades', 'Win Rate']}
-    
-    # Convert relevant parameters to integers
-    for param in ['hh_lookback', 'fast_length', 'slow_length', 'filter_length', 'atr_length', 'period_high_atr']:
-        best_parameters_for_backtest[param] = int(best_parameters_for_backtest[param])
-    
-    summary, stats, trades = run_backtest(symbol, timeframe, start_date, end_date, best_parameters_for_backtest)
-    
-    print("\nBacktest results with best parameters:")
-    for key, value in summary.items():
-        print(f"{key}: {value}")
-    
-    data = load_data_from_csv(f"{symbol.replace('/', '_')}_{timeframe}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv")
-    bt = Backtest(data, ImprovedTrading, cash=100000, commission=.002)
-    stats = bt.run(**best_parameters_for_backtest)
-    bt.plot(filename='backtest_results.html', open_browser=False)
+    # Run backtest with best parameters
+    summary, stats, trade_history, chart_html = run_backtest(symbol, timeframe, start_date, end_date, best_parameters)
     
     trade_details = generate_trade_details(stats)
-    add_summary_and_parameters_to_html('backtest_results.html', summary, best_parameters_for_backtest, trade_details, all_results)
     
-    print("Interactive chart and detailed results saved as 'backtest_results.html'")
+    response = {
+        'bestParameters': best_parameters,
+        'summary': summary,
+        'tradeDetails': trade_details.to_dict(orient='records'),
+        'chartHtml': chart_html,
+        'allResults': all_results.to_dict(orient='records')
+    }
     
-    save_results_to_csv(all_results, 'optimization_results.csv')
+    return jsonify(response)
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
